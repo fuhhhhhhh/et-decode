@@ -154,6 +154,7 @@ class ETPlayerMonitor:
             self._flush_actions_buffer()
         if self.db_connection:
             self.db_connection.close()
+        self._output_summary()
 
     def visualize_movement(self):
         # Extract positions for visualization
@@ -178,6 +179,16 @@ class ETPlayerMonitor:
         plt.ylabel('Y Position')
         plt.title('Player Movement Over Time (Smoothed)')
         plt.show()
+
+    def _output_summary(self):
+        # Generate a summary of actions from the database
+        cursor = self.db_connection.cursor()
+        cursor.execute("SELECT action, COUNT(*) FROM player_actions GROUP BY action")
+        summary = cursor.fetchall()
+
+        print("\nSummary of Player Actions:")
+        for action, count in summary:
+            print(f"Action: {action}, Count: {count}")
 
 # Instantiate the ETPlayerMonitor class and parse the demo
 monitor = ETPlayerMonitor(demo_file_path)
