@@ -1,211 +1,195 @@
 import sqlite3
 import struct
-from ctypes import Structure, c_int, c_float
-from enum import IntEnum
 import math
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
-# Constants
-MAX_INT32 = 2**31 - 1
-MIN_INT32 = -2**31
+# File path to the provided demo file
+demo_file_path = 'demo.dm_84'
 
-# Enums and Structs aligned with q_shared.h
+class ETPlayerMonitor:
+    def __init__(self, demo_file):
+        self.demo_file = demo_file
+        self.weapon_usage = {}
+        self.player_positions = {}
+        self.aim_patterns = {}
+        self.db_connection = None
+        self.actions_buffer = []  # Buffer to store actions for batch insert
+        self._initialize_database()
 
-class EntityType(IntEnum):
-    ET_GENERAL = 0
-    ET_PLAYER = 1
-    ET_ITEM = 2
-    ET_MISSILE = 3
-    ET_MOVER = 4
-    ET_BEAM = 5
-    ET_PORTAL = 6
-    ET_SPEAKER = 7
-    ET_TELEPORT_TRIGGER = 9
-    ET_INVISIBLE = 10
-    ET_OID_TRIGGER = 12
-    ET_EXPLOSIVE_INDICATOR = 13
-    ET_EXPLOSIVE = 14
-    # Add other types as needed
-
-class TrajectoryType(IntEnum):
-    TR_STATIONARY = 0
-    TR_INTERPOLATE = 1
-    TR_LINEAR = 2
-    TR_LINEAR_STOP = 3
-    TR_SINE = 4
-    TR_GRAVITY = 5
-    # Add other trajectory types as needed
-
-class Vec3(Structure):
-    _fields_ = [("x", c_float), ("y", c_float), ("z", c_float)]
-
-class Trajectory(Structure):
-    _fields_ = [
-        ("trType", c_int),
-        ("trTime", c_int),
-        ("trDuration", c_int),
-        ("trBase", Vec3),
-        ("trDelta", Vec3)
-    ]
-
-class EntityState(Structure):
-    _fields_ = [
-        ("number", c_int),
-        ("eType", c_int),
-        ("eFlags", c_int),
-        ("pos", Trajectory),
-        ("apos", Trajectory),
-        ("time", c_int),
-        ("time2", c_int),
-        ("origin", Vec3),
-        ("origin2", Vec3),
-        ("angles", Vec3),
-        ("angles2", Vec3)
-    ]
-
-# Helper functions
-
-def initialize_database(db_name='demo_data.db'):
-    """Initializes the database with a table for storing entity states."""
-    conn = sqlite3.connect(db_name)
-    cursor = conn.cursor()
-    
-    cursor.execute("DROP TABLE IF EXISTS entity_states")
-    
-    cursor.execute('''CREATE TABLE IF NOT EXISTS entity_states (
-                        number INTEGER,
-                        eType INTEGER,
-                        eFlags INTEGER,
-                        pos_trType INTEGER,
-                        pos_trTime INTEGER,
-                        pos_trDuration INTEGER,
-                        pos_trBase_x REAL, pos_trBase_y REAL, pos_trBase_z REAL,
-                        pos_trDelta_x REAL, pos_trDelta_y REAL, pos_trDelta_z REAL,
-                        apos_trType INTEGER,
-                        apos_trTime INTEGER,
-                        apos_trDuration INTEGER,
-                        apos_trBase_x REAL, apos_trBase_y REAL, apos_trBase_z REAL,
-                        apos_trDelta_x REAL, apos_trDelta_y REAL, apos_trDelta_z REAL,
-                        time INTEGER,
-                        time2 INTEGER,
-                        origin_x REAL, origin_y REAL, origin_z REAL,
-                        origin2_x REAL, origin2_y REAL, origin2_z REAL,
-                        angles_x REAL, angles_y REAL, angles_z REAL,
-                        angles2_x REAL, angles2_y REAL, angles2_z REAL
-                    )''')  
-    conn.commit()
-    conn.close()
-
-def sanitize_value(value):
-    """Sanitize NaN and Infinity values, replacing them with predefined limits."""
-    if isinstance(value, float):
-        if math.isnan(value) or value == float('inf') or value == float('-inf'):
-            return 0.0
-        else:
-            return max(MIN_INT32, min(MAX_INT32, value))
-    return value
-
-def parse_dm84_file(file_path):
-    """Parses the .dm_84 demo file and extracts entity states."""
-    entity_states = []
-    packet_size = struct.calcsize('<iiii9f9fiiiiiiiii9f9f')  # Assuming this is the correct size, adjust if necessary
-
-    with open(file_path, 'rb') as f:
-        while True:
-            packet = f.read(packet_size)
-            if not packet:
-                break
-            
-            if len(packet) != packet_size:
-                print(f"Warning: Packet size mismatch. Expected {packet_size} bytes, but got {len(packet)} bytes.")
-                continue
-            
-            unpacked_data = struct.unpack('<iiii9f9fiiiiiiiii9f9f', packet)
-            
-            # Sanitize and ensure data types are correct
-            sanitized_data = [sanitize_value(val) if val is not None else None for val in unpacked_data]
-            
-            # Initialize entity state with sanitized data
-            entity_state = EntityState(
-                number=int(sanitized_data[0]),  
-                eType=int(sanitized_data[1]),
-                eFlags=int(sanitized_data[2]),
-                pos=Trajectory(
-                    trType=int(sanitized_data[3]),
-                    trTime=int(sanitized_data[4]),
-                    trDuration=int(sanitized_data[5]),
-                    trBase=Vec3(float(sanitized_data[6] or 0), float(sanitized_data[7] or 0), float(sanitized_data[8] or 0)),
-                    trDelta=Vec3(float(sanitized_data[9] or 0), float(sanitized_data[10] or 0), float(sanitized_data[11] or 0))
-                ),
-                apos=Trajectory(
-                    trType=int(sanitized_data[12]),
-                    trTime=int(sanitized_data[13]),
-                    trDuration=int(sanitized_data[14]),
-                    trBase=Vec3(float(sanitized_data[15] or 0), float(sanitized_data[16] or 0), float(sanitized_data[17] or 0)),
-                    trDelta=Vec3(float(sanitized_data[18] or 0), float(sanitized_data[19] or 0), float(sanitized_data[20] or 0))
-                ),
-                time=int(sanitized_data[21] or 0),
-                time2=int(sanitized_data[22] or 0),
-                origin=Vec3(float(sanitized_data[23] or 0), float(sanitized_data[24] or 0), float(sanitized_data[25] or 0)),
-                origin2=Vec3(float(sanitized_data[26] or 0), float(sanitized_data[27] or 0), float(sanitized_data[28] or 0)),
-                angles=Vec3(float(sanitized_data[29] or 0), float(sanitized_data[30] or 0), float(sanitized_data[31] or 0)),
-                angles2=Vec3(float(sanitized_data[32] or 0), float(sanitized_data[33] or 0), float(sanitized_data[34] or 0))
+    def _initialize_database(self):
+        # Setup SQLite database for persistent storage of parsed data
+        self.db_connection = sqlite3.connect("player_data.db")
+        cursor = self.db_connection.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS player_actions (
+                timestamp INTEGER,
+                player_id INTEGER,
+                action TEXT,
+                weapon INTEGER,
+                pos_x REAL,
+                pos_y REAL,
+                pos_z REAL,
+                angle_x REAL,
+                angle_y REAL,
+                angle_z REAL,
+                velocity REAL,
+                accuracy REAL
             )
-            entity_states.append(entity_state)
+        """
+        )
+        self.db_connection.commit()
 
-    return entity_states
+    def parse_demo(self):
+        try:
+            with open(self.demo_file, "rb") as f:
+                file_size = f.seek(0, 2)
+                f.seek(0)  # Reset to the start
+                limit = int(file_size * 0.25)  # Parse first 25% of the file
+                chunk_size = 3200  # Read larger chunks to reduce I/O operations
 
-def save_entity_state_to_db(entity_state, db_name='demo_data.db'):
-    """Saves an EntityState instance to the SQLite database with dynamic handling of missing values."""
-    conn = sqlite3.connect(db_name)
-    cursor = conn.cursor()
+                while f.tell() < limit:
+                    chunk = f.read(min(chunk_size, limit - f.tell()))
+                    if not chunk:
+                        break  # End of file
+                    for i in range(0, len(chunk), 32):
+                        packet = chunk[i:i+32]
+                        if len(packet) < 32:
+                            break  # Incomplete packet
+                        self._process_packet(packet)
+                
+                # Insert any remaining actions in the buffer
+                self._flush_actions_buffer()
+        except Exception as e:
+            print("Error parsing demo:", e)
 
-    # Extract the non-None fields and their values
-    fields = []
-    values = []
+    def _process_packet(self, packet):
+        try:
+            # Unpacking relevant fields (customized for demonstration purposes)
+            data = struct.unpack("i" * 8, packet)  # Mock format, adjust as needed
+            raw_timestamp, eType, eFlags, pos_x, pos_y, pos_z, angle_x, angle_y = data[:8]
 
-    for field_tuple in EntityState._fields_:
-        field_name = field_tuple[0]  # Extract the field name
-        field_value = getattr(entity_state, field_name)
-        
-        if isinstance(field_value, Trajectory):
-            # Unpack Trajectory fields into individual components if the Trajectory object is not None
-            if field_value is not None:
-                fields.extend([f"{field_name}_trType", f"{field_name}_trTime", f"{field_name}_trDuration",
-                               f"{field_name}_trBase_x", f"{field_name}_trBase_y", f"{field_name}_trBase_z",
-                               f"{field_name}_trDelta_x", f"{field_name}_trDelta_y", f"{field_name}_trDelta_z"])
-                values.extend([field_value.trType, field_value.trTime, field_value.trDuration,
-                               field_value.trBase.x, field_value.trBase.y, field_value.trBase.z,
-                               field_value.trDelta.x, field_value.trDelta.y, field_value.trDelta.z])
-        elif isinstance(field_value, Vec3):
-            # Unpack Vec3 fields into individual components
-            if field_value is not None:
-                fields.extend([f"{field_name}_x", f"{field_name}_y", f"{field_name}_z"])
-                values.extend([field_value.x, field_value.y, field_value.z])
-        elif field_value is not None:
-            fields.append(field_name)
-            values.append(field_value)
+            # Refine timestamp interpretation
+            timestamp = self._convert_timestamp(raw_timestamp)
 
-    # Construct the dynamic SQL query based on available fields
-    query = f"INSERT INTO entity_states ({', '.join(fields)}) VALUES ({', '.join(['?'] * len(values))})"
-    
-    try:
-        cursor.execute(query, values)
-        conn.commit()
-    except sqlite3.OperationalError as e:
-        print(f"SQL Error: {e}")
-        print("Query:", query)
-        print("Values:", values)
-    finally:
-        conn.close()
+            # Extract and normalize data for interpretation
+            player_id = self._extract_player_id(eFlags)
+            self._interpret_position(timestamp, player_id, pos_x, pos_y, pos_z)
+            self._interpret_angles(timestamp, player_id, angle_x, angle_y, 0)  # Assuming angle_z is unused in this demo
+            self._interpret_weapon_usage(timestamp, player_id, eType, eFlags)
+        except struct.error as e:
+            print("Error in packet structure:", e)
 
-def process_demo_file(file_path, db_name='demo_data.db'):
-    """Processes the demo file, parses entity states, and stores them in the database."""
-    initialize_database(db_name)  # Set up the database
-    entity_states = parse_dm84_file(file_path)
-    for entity_state in entity_states:
-        save_entity_state_to_db(entity_state, db_name)
-    print(f"Processed and saved {len(entity_states)} entity states to the database.")
+    def _convert_timestamp(self, raw_timestamp):
+        # Convert raw timestamp to milliseconds, assuming the raw value is in ticks
+        # For example, assuming each tick is 1/20th of a second
+        return raw_timestamp * 50  # 50 ms per tick
 
-# Run the solution
-demo_file_path = 'demo.dm_84'  # Path to your .dm_84 demo file
-process_demo_file(demo_file_path)
+    def _extract_player_id(self, eFlags):
+        # Extract player ID from eFlags using bitwise operations
+        return (eFlags >> 16) & 0xFF  # Example: Extract bits 16-23 for player ID
+
+    def _interpret_position(self, timestamp, player_id, pos_x, pos_y, pos_z):
+        # Calculate movement details
+        if player_id in self.player_positions:
+            last_pos = self.player_positions[player_id]
+            distance = math.sqrt((pos_x - last_pos[0]) ** 2 + (pos_y - last_pos[1]) ** 2 + (pos_z - last_pos[2]) ** 2)
+            velocity = distance / (timestamp - last_pos[3]) if timestamp - last_pos[3] > 0 else 0
+            self._store_action(timestamp, player_id, "move", None, pos_x, pos_y, pos_z, None, None, None, velocity, None)
+        self.player_positions[player_id] = (pos_x, pos_y, pos_z, timestamp)
+
+    def _interpret_angles(self, timestamp, player_id, angle_x, angle_y, angle_z):
+        # Interpret aim direction and stability
+        if player_id not in self.aim_patterns:
+            self.aim_patterns[player_id] = []
+        self.aim_patterns[player_id].append((angle_x, angle_y, angle_z, timestamp))
+
+        # Check for unusual aim patterns (e.g., highly repetitive or precise)
+        if len(self.aim_patterns[player_id]) >= 2:
+            last_angle = self.aim_patterns[player_id][-2]
+            angle_change = sum(abs(last_angle[i] - (angle_x, angle_y, angle_z)[i]) for i in range(3))
+            if angle_change < 0.01:  # Threshold for aim consistency
+                self._store_action(timestamp, player_id, "aim_consistency", None, None, None, None, angle_x, angle_y, angle_z, None, None)
+
+    def _interpret_weapon_usage(self, timestamp, player_id, eType, eFlags):
+        weapon = self._extract_weapon(eFlags)  # Replace with actual weapon decoding logic
+
+        # Record firing, reloading, and other actions based on eType/eFlags
+        if eType == 1:  # Assume 1 is a "fire" event
+            if player_id not in self.weapon_usage:
+                self.weapon_usage[player_id] = {"shots": 0, "hits": 0}
+            self.weapon_usage[player_id]["shots"] += 1
+            self._store_action(timestamp, player_id, "fire", weapon, None, None, None, None, None, None, None, None)
+
+        elif eType == 2:  # Assume 2 is a "hit" event
+            if player_id in self.weapon_usage:
+                self.weapon_usage[player_id]["hits"] += 1
+                accuracy = self.weapon_usage[player_id]["hits"] / self.weapon_usage[player_id]["shots"]
+                self._store_action(timestamp, player_id, "hit", weapon, None, None, None, None, None, None, None, accuracy)
+
+        elif eType == 3:  # Assume 3 is a "reload" event
+            self._store_action(timestamp, player_id, "reload", weapon, None, None, None, None, None, None, None, None)
+
+    def _extract_weapon(self, eFlags):
+        # Extract weapon from eFlags using bitwise operations
+        return (eFlags >> 8) & 0xFF  # Example: Extract bits 8-15 for weapon ID
+
+    def _store_action(self, timestamp, player_id, action, weapon, pos_x, pos_y, pos_z, angle_x, angle_y, angle_z, velocity, accuracy):
+        self.actions_buffer.append((timestamp, player_id, action, weapon, pos_x, pos_y, pos_z, angle_x, angle_y, angle_z, velocity, accuracy))
+        if len(self.actions_buffer) >= 100:
+            self._flush_actions_buffer()
+
+    def _flush_actions_buffer(self):
+        cursor = self.db_connection.cursor()
+        cursor.executemany("""
+            INSERT INTO player_actions (timestamp, player_id, action, weapon, pos_x, pos_y, pos_z, angle_x, angle_y, angle_z, velocity, accuracy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, self.actions_buffer)
+        self.db_connection.commit()
+        self.actions_buffer = []
+
+    def close(self):
+        if self.actions_buffer:
+            self._flush_actions_buffer()
+        if self.db_connection:
+            self.db_connection.close()
+
+    def visualize_movement(self):
+        # Extract positions for visualization
+        player_id = 1  # Replace with actual player ID logic
+        if player_id not in self.player_positions:
+            print("No position data available for visualization.")
+            return
+
+        times = [pos[3] for pos in self.player_positions.values()]
+        positions = np.array([pos[:3] for pos in self.player_positions.values()])
+
+        # Smooth positions using Gaussian filter
+        x_smooth = gaussian_filter1d(positions[:, 0], sigma=2)
+        y_smooth = gaussian_filter1d(positions[:, 1], sigma=2)
+        z_smooth = gaussian_filter1d(positions[:, 2], sigma=2)
+
+        # Plot the smoothed movement in 2D
+        plt.figure(figsize=(12, 8))
+        plt.scatter(x_smooth, y_smooth, c=times, cmap='viridis', s=2)
+        plt.colorbar(label='Time (ms)')
+        plt.xlabel('X Position')
+        plt.ylabel('Y Position')
+        plt.title('Player Movement Over Time (Smoothed)')
+        plt.show()
+
+# Instantiate the ETPlayerMonitor class and parse the demo
+monitor = ETPlayerMonitor(demo_file_path)
+monitor.parse_demo()
+monitor.visualize_movement()
+monitor.close()
+
+# Displaying the database content for inspection
+connection = sqlite3.connect("player_data.db") #should be just player_data.db
+cursor = connection.cursor()
+cursor.execute("SELECT * FROM player_actions LIMIT 10")
+actions = cursor.fetchall()
+connection.close()
+
+print(actions)
