@@ -152,9 +152,9 @@ class ETPlayerMonitor:
     def close(self):
         if self.actions_buffer:
             self._flush_actions_buffer()
+        self._output_summary()
         if self.db_connection:
             self.db_connection.close()
-        self._output_summary()
 
     def visualize_movement(self):
         # Extract positions for visualization
